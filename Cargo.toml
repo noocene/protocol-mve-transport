@@ -1,0 +1,14 @@
+[package]
+name = "protocol-mve-transport"
+version = "0.1.0"
+authors = ["Izzy Swart <zenerboson@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+serde = "1.0.104"
+protocol = { git = "https://github.com/noocene/protocol" }
+thiserror = { git = "https://github.com/noocene/thiserror" }
+futures = { version = "0.3.4" }
+serde_cbor = "0.11.1"
+core-error = { git = "https://github.com/core-error/core-error" }
+void = "1.0.2"
