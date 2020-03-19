@@ -414,23 +414,16 @@ impl<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> CoalesceContextu
     type Target = Self;
 }
 
-impl<
-        E,
-        T: Stream<Item = Result<Vec<u8>, E>>,
-        U: Sink<Vec<u8>>,
-        F: protocol::Future<Transport<E, T, U>> + Unpin,
-    > ContextualizeCoalesce<F> for Transport<E, T, U>
+impl<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> ContextualizeCoalesce
+    for Transport<E, T, U>
 {
-    type Output = Ready<Contextualized<E, T, U, F>>;
-    type Future = Contextualized<E, T, U, F>;
+    type Context = Transport<E, T, U>;
+    type Output = Ready<Self::Context>;
 
-    fn contextualize(&mut self, handle: Self::Handle, fut: F) -> Self::Output {
-        ready(Contextualized {
-            fut,
-            transport: Transport {
-                inner: self.inner.clone(),
-                id: ContextHandle(handle),
-            },
+    fn contextualize(&mut self, handle: Self::Handle) -> Self::Output {
+        ready(Transport {
+            inner: self.inner.clone(),
+            id: ContextHandle(handle),
         })
     }
 }
