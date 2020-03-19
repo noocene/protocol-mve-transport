@@ -1,9 +1,10 @@
 use core_error::Error;
 use futures::{ready, Sink, Stream};
 use protocol::{
+    future::MapOk,
     future::{ready, Ready},
     CoalesceContextualizer, ContextualizeCoalesce, ContextualizeUnravel, Contextualizer, Dispatch,
-    Fork, Future as _, Join, Read, UnravelContext, Write,
+    Fork, Future as _, FutureExt, Join, Notify, Read, UnravelContext, Write,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
@@ -284,6 +285,16 @@ impl<
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
+    > Dispatch<Notification<P>> for Transport<E, T, U>
+{
+    type Handle = ();
+}
+
+impl<
+        E,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
     > Fork<P> for Transport<E, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
@@ -308,6 +319,65 @@ impl<
 
     fn join(&mut self, _: ()) -> Self::Future {
         P::coalesce()
+    }
+}
+
+pub struct Notification<P>(P);
+
+impl<
+        E,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
+    > Join<Notification<P>> for Transport<E, T, U>
+where
+    <P as protocol::Coalesce<Self>>::Future: Unpin,
+{
+    type Future = MapOk<<P as protocol::Coalesce<Self>>::Future, fn(P) -> Notification<P>>;
+
+    fn join(&mut self, _: ()) -> Self::Future {
+        P::coalesce().map_ok(Notification)
+    }
+}
+
+impl<
+        E,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
+    > Fork<Notification<P>> for Transport<E, T, U>
+where
+    <P as protocol::Unravel<Self>>::Target: Unpin,
+{
+    type Finalize = <P as protocol::Unravel<Self>>::Finalize;
+    type Target = <P as protocol::Unravel<Self>>::Target;
+    type Future = Ready<(Self::Target, ())>;
+
+    fn fork(&mut self, item: Notification<P>) -> Self::Future {
+        ready((item.0.unravel(), ()))
+    }
+}
+
+impl<
+        E,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self> + Unpin,
+    > Notify<P> for Transport<E, T, U>
+where
+    <P as protocol::Unravel<Self>>::Target: Unpin,
+    <P as protocol::Coalesce<Self>>::Future: Unpin,
+{
+    type Notification = Notification<P>;
+    type Wrap = Ready<Notification<P>>;
+    type Unwrap = Ready<P>;
+
+    fn unwrap(&mut self, notification: Self::Notification) -> Self::Unwrap {
+        ready(notification.0)
+    }
+
+    fn wrap(&mut self, item: P) -> Self::Wrap {
+        ready(Notification(item))
     }
 }
 

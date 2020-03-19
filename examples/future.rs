@@ -6,7 +6,7 @@ use protocol::{
     ProtocolError,
 };
 use protocol_mve_transport::{Coalesce, Unravel};
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, thread::spawn};
 use void::Void;
 
 #[derive(Debug)]
@@ -38,13 +38,17 @@ impl From<ProtocolError> for Shim {
 fn main() {
     block_on(async {
         let (sender, receiver) = unbounded();
-        Unravel::<(), _, _, Pin<Box<dyn Future<Output = Result<String, Shim>>>>>::new(
-            empty(),
-            sender,
-            Box::pin(async { Ok("hello".to_owned()) }),
-        )
-        .await
-        .unwrap();
+        spawn(move || {
+            block_on(async move {
+                Unravel::<(), _, _, Pin<Box<dyn Future<Output = Result<String, Shim>>>>>::new(
+                    empty(),
+                    sender,
+                    Box::pin(async { Ok("hello".to_owned()) }),
+                )
+                .await
+                .unwrap();
+            })
+        });
         let data = Coalesce::<_, _, _, Pin<Box<dyn Future<Output = Result<String, Shim>>>>>::new(
             receiver.map(Ok::<Vec<u8>, Void>),
             drain(),
