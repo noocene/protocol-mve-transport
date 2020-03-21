@@ -43,11 +43,17 @@ fn main() {
     let (b_sender, b_receiver) = unbounded();
 
     s.spawn_local(async move {
-        Unravel::<Void, _, _, _, Pin<Box<dyn Future<Output = Result<String, Shim>>>>>::new(
+        Unravel::<
+            Void,
+            _,
+            _,
+            _,
+            Box<dyn FnOnce(String) -> Pin<Box<dyn Future<Output = Result<String, Shim>>>>>,
+        >::new(
             a_receiver.map(Ok::<Vec<u8>, Void>),
             b_sender,
             spawner,
-            Box::pin(async move { Ok("hello".to_owned()) }),
+            Box::new(|data| Box::pin(async move { Ok(format!("echo: {}", data)) })),
         )
         .await
         .unwrap();
@@ -57,13 +63,15 @@ fn main() {
     let spawner = s.clone();
 
     s.spawn_local(async move {
-        let data = Coalesce::<_, _, _, _, Pin<Box<dyn Future<Output = Result<String, Shim>>>>>::new(
-            b_receiver.map(Ok::<Vec<u8>, Void>),
-            a_sender,
-            spawner,
-        );
-        let data = data.await.unwrap();
-        println!("{:?}", data.await);
+        let data = Coalesce::<
+            _,
+            _,
+            _,
+            _,
+            Box<dyn FnOnce(String) -> Pin<Box<dyn Future<Output = Result<String, Shim>>>>>,
+        >::new(b_receiver.map(Ok::<Vec<u8>, Void>), a_sender, spawner);
+        let call = data.await.unwrap();
+        println!("{:?}", (call)("hello".to_owned()).await);
     })
     .unwrap();
 

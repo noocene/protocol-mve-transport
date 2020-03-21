@@ -1,10 +1,14 @@
 use core_error::Error;
-use futures::{ready, Sink, Stream};
+use futures::{
+    ready,
+    task::{LocalSpawn, LocalSpawnExt, SpawnError},
+    FutureExt as _, Sink, Stream,
+};
 use protocol::{
     future::MapOk,
-    future::{ready, Ready},
+    future::{ok, ready, Ready},
     CoalesceContextualizer, ContextualizeCoalesce, ContextualizeUnravel, Contextualizer, Dispatch,
-    Fork, Future as _, FutureExt, Join, Notify, Read, UnravelContext, Write,
+    Finalize, Fork, Future as _, FutureExt, Join, Notify, Read, UnravelContext, Write,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
@@ -105,28 +109,39 @@ impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Transpor
     }
 }
 
-pub struct Transport<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> {
+pub struct Transport<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> {
     id: ContextHandle,
+    spawner: S,
     inner: Arc<Mutex<TransportInner<E, T, U>>>,
 }
 
-impl<E, I: DeserializeOwned, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Read<I>
-    for Transport<E, T, U>
+impl<
+        E,
+        S: LocalSpawn,
+        I: DeserializeOwned,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+    > Read<I> for Transport<E, S, T, U>
 {
     type Error = SerdeReadError<E>;
 
-    fn read(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<I, Self::Error>> {
+    fn read(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<I, Self::Error>> {
         let id = self.id;
         Pin::new(&mut *self.inner.lock().unwrap()).read(cx, id)
     }
 }
 
-impl<E, I: Serialize, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Unpin + Sink<Vec<u8>>>
-    Write<I> for Transport<E, T, U>
+impl<
+        E,
+        S: LocalSpawn,
+        I: Serialize,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Unpin + Sink<Vec<u8>>,
+    > Write<I> for Transport<E, S, T, U>
 {
     type Error = SerdeWriteError<U::Error>;
 
-    fn write(mut self: Pin<&mut Self>, item: I) -> Result<(), Self::Error> {
+    fn write(self: Pin<&mut Self>, item: I) -> Result<(), Self::Error> {
         let mut data = self.id.0.to_be_bytes().as_ref().to_owned();
         data.append(&mut to_vec(&item).map_err(SerdeWriteError::Serde)?);
         Pin::new(&mut self.inner.lock().unwrap().sink)
@@ -134,13 +149,13 @@ impl<E, I: Serialize, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Unpin + S
             .map_err(SerdeWriteError::Sink)
     }
 
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.inner.lock().unwrap().sink)
             .poll_ready(cx)
             .map_err(SerdeWriteError::Sink)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.inner.lock().unwrap().sink)
             .poll_flush(cx)
             .map_err(SerdeWriteError::Sink)
@@ -149,12 +164,13 @@ impl<E, I: Serialize, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Unpin + S
 
 pub struct Coalesce<
     E,
+    S: LocalSpawn,
     T: Stream<Item = Result<Vec<u8>, E>>,
     U: Sink<Vec<u8>>,
-    P: protocol::Coalesce<Transport<E, T, U>>,
+    P: protocol::Coalesce<Transport<E, S, T, U>>,
 > {
     fut: P::Future,
-    transport: Transport<E, T, U>,
+    transport: Transport<E, S, T, U>,
 }
 
 enum UnravelState<T, U> {
@@ -164,25 +180,27 @@ enum UnravelState<T, U> {
 
 pub struct Unravel<
     E,
+    S: LocalSpawn,
     T: Stream<Item = Result<Vec<u8>, E>>,
     U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Transport<E, T, U>>,
+    P: protocol::Unravel<Transport<E, S, T, U>>,
 > {
     fut: UnravelState<P::Target, P::Finalize>,
-    transport: Transport<E, T, U>,
+    transport: Transport<E, S, T, U>,
 }
 
 impl<
         E,
+        S: LocalSpawn + Unpin,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
-        P: protocol::Unravel<Transport<E, T, U>>,
-    > Future for Unravel<E, T, U, P>
+        P: protocol::Unravel<Transport<E, S, T, U>>,
+    > Future for Unravel<E, S, T, U, P>
 where
     P::Target: Unpin,
     P::Finalize: Unpin,
 {
-    type Output = Result<(), <P::Target as protocol::Future<Transport<E, T, U>>>::Error>;
+    type Output = Result<(), <P::Target as protocol::Future<Transport<E, S, T, U>>>::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = &mut *self;
@@ -204,14 +222,15 @@ where
 
 impl<
         E,
+        S: LocalSpawn + Unpin,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
-        P: protocol::Coalesce<Transport<E, T, U>>,
-    > Future for Coalesce<E, T, U, P>
+        P: protocol::Coalesce<Transport<E, S, T, U>>,
+    > Future for Coalesce<E, S, T, U, P>
 where
     P::Future: Unpin,
 {
-    type Output = Result<P, <P::Future as protocol::Future<Transport<E, T, U>>>::Error>;
+    type Output = Result<P, <P::Future as protocol::Future<Transport<E, S, T, U>>>::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = &mut *self;
@@ -221,14 +240,15 @@ where
 
 impl<
         E,
+        S: LocalSpawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
-        P: protocol::Coalesce<Transport<E, T, U>>,
-    > Coalesce<E, T, U, P>
+        P: protocol::Coalesce<Transport<E, S, T, U>>,
+    > Coalesce<E, S, T, U, P>
 where
     P::Future: Unpin,
 {
-    pub fn new(stream: T, sink: U) -> Self {
+    pub fn new(stream: T, sink: U, spawner: S) -> Self {
         Coalesce {
             transport: Transport {
                 inner: Arc::new(Mutex::new(TransportInner {
@@ -237,6 +257,7 @@ where
                     next_id: 2,
                     buffer: HashMap::new(),
                 })),
+                spawner,
                 id: ContextHandle(0),
             },
             fut: P::coalesce(),
@@ -246,15 +267,16 @@ where
 
 impl<
         E,
+        S: LocalSpawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
-        P: protocol::Unravel<Transport<E, T, U>>,
-    > Unravel<E, T, U, P>
+        P: protocol::Unravel<Transport<E, S, T, U>>,
+    > Unravel<E, S, T, U, P>
 where
     P::Target: Unpin,
     P::Finalize: Unpin,
 {
-    pub fn new(stream: T, sink: U, item: P) -> Self {
+    pub fn new(stream: T, sink: U, spawner: S, item: P) -> Self {
         Unravel {
             transport: Transport {
                 inner: Arc::new(Mutex::new(TransportInner {
@@ -263,6 +285,7 @@ where
                     stream,
                     buffer: HashMap::new(),
                 })),
+                spawner,
                 id: ContextHandle(0),
             },
             fut: UnravelState::Target(item.unravel()),
@@ -272,30 +295,33 @@ where
 
 impl<
         E,
+        S: LocalSpawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Dispatch<P> for Transport<E, T, U>
+    > Dispatch<P> for Transport<E, S, T, U>
 {
     type Handle = ();
 }
 
 impl<
         E,
+        S: LocalSpawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Dispatch<Notification<P>> for Transport<E, T, U>
+    > Dispatch<Notification<P>> for Transport<E, S, T, U>
 {
     type Handle = ();
 }
 
 impl<
         E,
+        S: LocalSpawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Fork<P> for Transport<E, T, U>
+    > Fork<P> for Transport<E, S, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
 {
@@ -304,16 +330,17 @@ where
     type Future = Ready<(Self::Target, ())>;
 
     fn fork(&mut self, item: P) -> Self::Future {
-        ready((item.unravel(), ()))
+        ok((item.unravel(), ()))
     }
 }
 
 impl<
         E,
+        S: LocalSpawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Join<P> for Transport<E, T, U>
+    > Join<P> for Transport<E, S, T, U>
 {
     type Future = <P as protocol::Coalesce<Self>>::Future;
 
@@ -326,10 +353,11 @@ pub struct Notification<P>(P);
 
 impl<
         E,
+        S: LocalSpawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Join<Notification<P>> for Transport<E, T, U>
+    > Join<Notification<P>> for Transport<E, S, T, U>
 where
     <P as protocol::Coalesce<Self>>::Future: Unpin,
 {
@@ -342,10 +370,11 @@ where
 
 impl<
         E,
+        S: LocalSpawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Fork<Notification<P>> for Transport<E, T, U>
+    > Fork<Notification<P>> for Transport<E, S, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
 {
@@ -354,16 +383,17 @@ where
     type Future = Ready<(Self::Target, ())>;
 
     fn fork(&mut self, item: Notification<P>) -> Self::Future {
-        ready((item.0.unravel(), ()))
+        ok((item.0.unravel(), ()))
     }
 }
 
 impl<
         E,
+        S: LocalSpawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self> + Unpin,
-    > Notify<P> for Transport<E, T, U>
+    > Notify<P> for Transport<E, S, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
     <P as protocol::Coalesce<Self>>::Future: Unpin,
@@ -373,25 +403,32 @@ where
     type Unwrap = Ready<P>;
 
     fn unwrap(&mut self, notification: Self::Notification) -> Self::Unwrap {
-        ready(notification.0)
+        ok(notification.0)
     }
 
     fn wrap(&mut self, item: P) -> Self::Wrap {
-        ready(Notification(item))
+        ok(Notification(item))
     }
 }
 
-pub struct Contextualized<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>, F> {
+pub struct Contextualized<
+    E,
+    S: LocalSpawn,
+    T: Stream<Item = Result<Vec<u8>, E>>,
+    U: Sink<Vec<u8>>,
+    F,
+> {
     fut: F,
-    transport: Transport<E, T, U>,
+    transport: Transport<E, S, T, U>,
 }
 
 impl<
         E,
+        S: LocalSpawn + Unpin,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
-        F: Unpin + protocol::Future<Transport<E, T, U>>,
-    > Future for Contextualized<E, T, U, F>
+        F: Unpin + protocol::Future<Transport<E, S, T, U>>,
+    > Future for Contextualized<E, S, T, U, F>
 {
     type Output = Result<F::Ok, F::Error>;
 
@@ -402,38 +439,39 @@ impl<
     }
 }
 
-impl<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Contextualizer
-    for Transport<E, T, U>
+impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Contextualizer
+    for Transport<E, S, T, U>
 {
     type Handle = u32;
 }
 
-impl<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> CoalesceContextualizer
-    for Transport<E, T, U>
+impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
+    CoalesceContextualizer for Transport<E, S, T, U>
 {
     type Target = Self;
 }
 
-impl<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> ContextualizeCoalesce
-    for Transport<E, T, U>
+impl<E, S: LocalSpawn + Clone + Unpin, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
+    ContextualizeCoalesce for Transport<E, S, T, U>
 {
-    type Context = Transport<E, T, U>;
+    type Context = Transport<E, S, T, U>;
     type Output = Ready<Self::Context>;
 
     fn contextualize(&mut self, handle: Self::Handle) -> Self::Output {
-        ready(Transport {
+        ok(Transport {
             inner: self.inner.clone(),
+            spawner: self.spawner.clone(),
             id: ContextHandle(handle),
         })
     }
 }
 
-impl<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> UnravelContext<Transport<E, T, U>>
-    for Transport<E, T, U>
+impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
+    UnravelContext<Transport<E, S, T, U>> for Transport<E, S, T, U>
 {
-    type Target = Transport<E, T, U>;
+    type Target = Transport<E, S, T, U>;
 
-    fn with<'a, 'b: 'a, R: BorrowMut<Transport<E, T, U>> + 'b>(
+    fn with<'a, 'b: 'a, R: BorrowMut<Transport<E, S, T, U>> + 'b>(
         &'a mut self,
         _: R,
     ) -> &'a mut Self::Target {
@@ -441,21 +479,54 @@ impl<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> UnravelContext<T
     }
 }
 
-impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> ContextualizeUnravel
-    for Transport<E, T, U>
+impl<
+        E,
+        S: LocalSpawn + Clone + Unpin,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+    > ContextualizeUnravel for Transport<E, S, T, U>
 {
-    type Context = Transport<E, T, U>;
-    type Output = Ready<(Transport<E, T, U>, u32)>;
+    type Context = Transport<E, S, T, U>;
+    type Output = Ready<(Transport<E, S, T, U>, u32)>;
 
     fn contextualize(&mut self) -> Self::Output {
         let id = self.inner.lock().unwrap().next_id();
 
-        ready((
+        ok((
             Transport {
                 inner: self.inner.clone(),
+                spawner: self.spawner.clone(),
                 id,
             },
             id.0,
         ))
+    }
+}
+
+impl<
+        F: Unpin + protocol::Future<Self> + 'static,
+        E: 'static,
+        S: Unpin + LocalSpawn + Clone + 'static,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
+        U: Sink<Vec<u8>> + 'static,
+    > Finalize<F> for Transport<E, S, T, U>
+{
+    type Target = Self;
+    type Output = Ready<(), SpawnError>;
+
+    fn finalize(&mut self, fut: F) -> Self::Output {
+        ready(
+            self.spawner.spawn_local(
+                Contextualized {
+                    fut,
+                    transport: Transport {
+                        id: self.id,
+                        inner: self.inner.clone(),
+                        spawner: self.spawner.clone(),
+                    },
+                }
+                .map(|_| ()),
+            ),
+        )
     }
 }
