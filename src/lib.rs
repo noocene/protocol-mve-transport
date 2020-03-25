@@ -7,8 +7,8 @@ use futures::{
 use protocol::{
     future::MapOk,
     future::{ok, ready, Ready},
-    CoalesceContextualizer, ContextualizeCoalesce, ContextualizeUnravel, Contextualizer, Dispatch,
-    Finalize, Fork, Future as _, FutureExt, Join, Notify, Read, UnravelContext, Write,
+    CloneContext, ShareContext, ContextReference, Contextualize, Dispatch, Finalize, FinalizeImmediate, Fork,
+    Future as _, FutureExt, Join, Notify, Read, ReferenceContext, Write,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_cbor::{error::Error as CborError, from_slice, to_vec};
@@ -113,6 +113,16 @@ pub struct Transport<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: 
     id: ContextHandle,
     spawner: S,
     inner: Arc<Mutex<TransportInner<E, T, U>>>,
+}
+
+impl<E, S: LocalSpawn + Clone, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Clone for Transport<E, S, T, U> {
+    fn clone(&self) -> Self {
+        Transport {
+            id: self.id,
+            spawner: self.spawner.clone(),
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<
@@ -439,35 +449,80 @@ impl<
     }
 }
 
-impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Contextualizer
+impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Contextualize
     for Transport<E, S, T, U>
 {
     type Handle = u32;
 }
 
-impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
-    CoalesceContextualizer for Transport<E, S, T, U>
-{
-    type Target = Self;
-}
-
-impl<E, S: LocalSpawn + Clone + Unpin, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
-    ContextualizeCoalesce for Transport<E, S, T, U>
+impl<
+        E,
+        S: LocalSpawn + Clone + Unpin,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+    > CloneContext for Transport<E, S, T, U>
 {
     type Context = Transport<E, S, T, U>;
-    type Output = Ready<Self::Context>;
+    type ForkOutput = Ready<(Transport<E, S, T, U>, u32)>;
+    type JoinOutput = Ready<Transport<E, S, T, U>>;
 
-    fn contextualize(&mut self, handle: Self::Handle) -> Self::Output {
+    fn fork_owned(&mut self) -> Self::ForkOutput {
+        let id = self.inner.lock().unwrap().next_id();
+
+        ok((
+            Transport {
+                inner: self.inner.clone(),
+                spawner: self.spawner.clone(),
+                id,
+            },
+            id.0,
+        ))
+    }
+
+    fn join_owned(&mut self, id: Self::Handle) -> Self::JoinOutput {
         ok(Transport {
             inner: self.inner.clone(),
             spawner: self.spawner.clone(),
-            id: ContextHandle(handle),
+            id: ContextHandle(id),
+        })
+    }
+}
+
+impl<
+        E,
+        S: LocalSpawn + Clone + Unpin,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+    > ShareContext for Transport<E, S, T, U>
+{
+    type Context = Transport<E, S, T, U>;
+    type ForkOutput = Ready<(Transport<E, S, T, U>, u32)>;
+    type JoinOutput = Ready<Transport<E, S, T, U>>;
+
+    fn fork_shared(&mut self) -> Self::ForkOutput {
+        let id = self.inner.lock().unwrap().next_id();
+
+        ok((
+            Transport {
+                inner: self.inner.clone(),
+                spawner: self.spawner.clone(),
+                id,
+            },
+            id.0,
+        ))
+    }
+
+    fn join_shared(&mut self, id: Self::Handle) -> Self::JoinOutput {
+        ok(Transport {
+            inner: self.inner.clone(),
+            spawner: self.spawner.clone(),
+            id: ContextHandle(id),
         })
     }
 }
 
 impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
-    UnravelContext<Transport<E, S, T, U>> for Transport<E, S, T, U>
+    ContextReference<Transport<E, S, T, U>> for Transport<E, S, T, U>
 {
     type Target = Transport<E, S, T, U>;
 
@@ -484,12 +539,13 @@ impl<
         S: LocalSpawn + Clone + Unpin,
         T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
-    > ContextualizeUnravel for Transport<E, S, T, U>
+    > ReferenceContext for Transport<E, S, T, U>
 {
     type Context = Transport<E, S, T, U>;
-    type Output = Ready<(Transport<E, S, T, U>, u32)>;
+    type ForkOutput = Ready<(Transport<E, S, T, U>, u32)>;
+    type JoinOutput = Ready<Transport<E, S, T, U>>;
 
-    fn contextualize(&mut self) -> Self::Output {
+    fn fork_ref(&mut self) -> Self::ForkOutput {
         let id = self.inner.lock().unwrap().next_id();
 
         ok((
@@ -500,6 +556,14 @@ impl<
             },
             id.0,
         ))
+    }
+
+    fn join_ref(&mut self, id: Self::Handle) -> Self::JoinOutput {
+        ok(Transport {
+            inner: self.inner.clone(),
+            spawner: self.spawner.clone(),
+            id: ContextHandle(id),
+        })
     }
 }
 
@@ -527,6 +591,32 @@ impl<
                 }
                 .map(|_| ()),
             ),
+        )
+    }
+}
+
+impl<
+        F: Unpin + protocol::Future<Self> + 'static,
+        E: 'static,
+        S: Unpin + LocalSpawn + Clone + 'static,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
+        U: Sink<Vec<u8>> + 'static,
+    > FinalizeImmediate<F> for Transport<E, S, T, U>
+{
+    type Target = Self;
+    type Error = SpawnError;
+
+    fn finalize(&mut self, fut: F) -> Result<(), SpawnError> {
+        self.spawner.spawn_local(
+            Contextualized {
+                fut,
+                transport: Transport {
+                    id: self.id,
+                    inner: self.inner.clone(),
+                    spawner: self.spawner.clone(),
+                },
+            }
+            .map(|_| ()),
         )
     }
 }
