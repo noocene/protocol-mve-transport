@@ -28,7 +28,8 @@ impl<C: ?Sized> protocol::Coalesce<C> for Shim {
 }
 
 impl From<ProtocolError> for Shim {
-    fn from(_: ProtocolError) -> Self {
+    fn from(error: ProtocolError) -> Self {
+        eprintln!("{}", error);
         Shim
     }
 }
