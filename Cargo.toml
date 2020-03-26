@@ -6,7 +6,7 @@ edition = "2018"
 
 [dependencies]
 serde = "1.0.104"
-protocol = { git = "https://github.com/noocene/protocol" }
+protocol = { path = "../protocol" }
 thiserror = { git = "https://github.com/noocene/thiserror" }
 futures = { version = "0.3.4" }
 core-error = { git = "https://github.com/core-error/core-error" }
