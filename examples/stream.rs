@@ -4,31 +4,15 @@ use futures::{
 };
 use protocol::{
     future::{ok, Ready},
-    ProtocolError,
+    protocol, ProtocolError,
 };
 use protocol_mve_transport::{Coalesce, Unravel};
 use std::pin::Pin;
 use void::Void;
 
+#[protocol]
 #[derive(Debug)]
 pub struct Shim;
-
-impl<C: ?Sized> protocol::Unravel<C> for Shim {
-    type Finalize = Ready<()>;
-    type Target = Ready<Ready<()>>;
-
-    fn unravel(self) -> Self::Target {
-        ok(ok(()))
-    }
-}
-
-impl<C: ?Sized> protocol::Coalesce<C> for Shim {
-    type Future = Ready<Shim>;
-
-    fn coalesce() -> Self::Future {
-        ok(Shim)
-    }
-}
 
 impl From<ProtocolError> for Shim {
     fn from(error: ProtocolError) -> Self {
