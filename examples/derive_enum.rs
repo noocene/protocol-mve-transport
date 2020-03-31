@@ -4,26 +4,15 @@ use futures::{channel::mpsc::unbounded, executor::LocalPool, task::LocalSpawnExt
 use protocol::protocol;
 use protocol_mve_transport::{Coalesce, Unravel};
 use void::Void;
-
 #[protocol]
 #[derive(Debug)]
-pub struct Unit;
-
-#[protocol]
-#[derive(Debug)]
-pub struct Newtype(u16);
-
-#[protocol]
-#[derive(Debug)]
-pub struct Tuple(Vec<String>, u8, Newtype);
-
-#[protocol]
-#[derive(Debug)]
-pub struct Test {
-    data: u8,
-    other: String,
-    unit: Unit,
-    tuple: Tuple,
+pub enum Test {
+    Data {
+        item: u8,
+        other: String,
+    },
+    Test(u8),
+    None
 }
 
 fn main() {
@@ -40,19 +29,9 @@ fn main() {
             a_receiver.map(Ok::<Vec<u8>, Void>),
             b_sender,
             spawner,
-            Test {
-                data: 10,
-                other: "hello".to_owned(),
-                unit: Unit,
-                tuple: Tuple(
-                    ["there", "general", "kenoi"]
-                        .iter()
-                        .cloned()
-                        .map(String::from)
-                        .collect(),
-                    5,
-                    Newtype(20),
-                ),
+            Test::Data {
+                item: 11,
+                other: "hello there".to_owned(),
             },
         )
         .await
