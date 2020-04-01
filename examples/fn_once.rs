@@ -1,8 +1,7 @@
 use futures::{channel::mpsc::unbounded, executor::LocalPool, task::LocalSpawnExt, StreamExt};
 use protocol::{
     future::{ok, Ready},
-    ProtocolError,
-    protocol
+    protocol, ProtocolError,
 };
 use protocol_mve_transport::{Coalesce, Unravel};
 use std::{future::Future, pin::Pin};
