@@ -1,3 +1,4 @@
+use core::marker::PhantomData;
 use futures::{
     channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
     executor::{LocalPool, LocalSpawner},
@@ -10,11 +11,14 @@ use protocol_mve_transport::{Coalesce, Unravel};
 use void::Void;
 
 #[protocol]
-#[derive(Debug)]
-pub enum Test {
-    Data { item: u8, other: String },
-    Test(u8),
-    None,
+trait Test<T, U> {
+    type A: Copy;
+}
+
+pub struct Implementor<A>(PhantomData<A>);
+
+impl<T, U, A: Copy> Test<T, U> for Implementor<A> {
+    type A = A;
 }
 
 fn main() {
@@ -32,15 +36,12 @@ fn main() {
             LocalSpawner,
             Map<UnboundedReceiver<Vec<u8>>, fn(Vec<u8>) -> Result<Vec<u8>, Void>>,
             UnboundedSender<Vec<u8>>,
-            Test,
+            Box<dyn Test<(), String, A = u8>>,
         >::new(
             a_receiver.map(Ok::<Vec<u8>, Void>),
             b_sender,
             spawner,
-            Test::Data {
-                item: 11,
-                other: "hello there".to_owned(),
-            },
+            Box::new(Implementor(PhantomData)),
         )
         .await
         .unwrap();
@@ -55,9 +56,9 @@ fn main() {
             LocalSpawner,
             Map<UnboundedReceiver<Vec<u8>>, fn(Vec<u8>) -> Result<Vec<u8>, Void>>,
             UnboundedSender<Vec<u8>>,
-            Test,
+            Box<dyn Test<(), String, A = u8>>,
         >::new(b_receiver.map(Ok::<Vec<u8>, Void>), a_sender, spawner);
-        println!("{:?}", data.await.unwrap())
+        data.await.unwrap();
     })
     .unwrap();
 
