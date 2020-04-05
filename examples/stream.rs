@@ -2,10 +2,7 @@ use futures::{
     channel::mpsc::unbounded, executor::LocalPool, stream::iter, task::LocalSpawnExt, Stream,
     StreamExt,
 };
-use protocol::{
-    future::{ok, Ready},
-    protocol, ProtocolError,
-};
+use protocol::{protocol, ProtocolError};
 use protocol_mve_transport::{Coalesce, Unravel};
 use std::pin::Pin;
 use void::Void;

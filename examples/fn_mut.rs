@@ -1,8 +1,5 @@
 use futures::{channel::mpsc::unbounded, executor::LocalPool, task::LocalSpawnExt, StreamExt};
-use protocol::{
-    future::{ok, Ready},
-    protocol, ProtocolError,
-};
+use protocol::{protocol, ProtocolError};
 use protocol_mve_transport::{Coalesce, Unravel};
 use std::{future::Future, pin::Pin};
 use void::Void;
