@@ -5,7 +5,7 @@ authors = ["Izzy Swart <zenerboson@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-serde = "1.0.104"
+serde = { version = "1.0.104", features = ["derive"] }
 protocol = { git = "https://github.com/noocene/protocol" }
 thiserror = { git = "https://github.com/noocene/thiserror" }
 futures = { version = "0.3.4" }
