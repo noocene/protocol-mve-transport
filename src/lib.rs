@@ -12,6 +12,7 @@ use protocol::{
     Future as _, FutureExt, Join, Notify, Read, ReferenceContext, ShareContext, Write,
 };
 use serde::{de::DeserializeOwned, Serialize};
+// use serde_json::{from_slice, to_vec, Error as BincodeError};
 use std::{
     borrow::BorrowMut,
     collections::{HashMap, VecDeque},
@@ -77,7 +78,7 @@ impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Transpor
         if let Some(data) = this
             .buffer
             .get_mut(&handle)
-            .map(|container| container.pop_back())
+            .map(|container| container.pop_front())
             .flatten()
         {
             Poll::Ready(from_slice(&data[4..]).map_err(SerdeReadError::Serde))
@@ -90,18 +91,20 @@ impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Transpor
                 if data.len() < 4 {
                     return Poll::Ready(Err(SerdeReadError::Insufficient));
                 }
-                if u32::from_be_bytes(
+
+                let target_handle = u32::from_be_bytes(
                     data[..4]
                         .try_into()
                         .map_err(|_| SerdeReadError::Insufficient)?,
-                ) == handle.0
-                {
+                );
+
+                if target_handle == handle.0 {
                     break data;
                 } else {
                     this.buffer
-                        .entry(handle)
+                        .entry(ContextHandle(target_handle))
                         .or_insert(VecDeque::new())
-                        .push_front(data);
+                        .push_back(data);
                 }
             };
             Poll::Ready(from_slice(&data[4..]).map_err(SerdeReadError::Serde))
@@ -128,12 +131,12 @@ impl<E, S: LocalSpawn + Clone, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    I: DeserializeOwned,
-    T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-> Read<I> for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn,
+        I: DeserializeOwned,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+    > Read<I> for Transport<E, S, T, U>
 {
     type Error = SerdeReadError<E>;
 
@@ -144,12 +147,12 @@ impl<
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    I: Serialize,
-    T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-    U: Unpin + Sink<Vec<u8>>,
-> Write<I> for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn,
+        I: Serialize,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Unpin + Sink<Vec<u8>>,
+    > Write<I> for Transport<E, S, T, U>
 {
     type Error = SerdeWriteError<U::Error>;
 
@@ -202,12 +205,12 @@ pub struct Unravel<
 }
 
 impl<
-    E,
-    S: LocalSpawn + Unpin,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Transport<E, S, T, U>>,
-> Future for Unravel<E, S, T, U, P>
+        E,
+        S: LocalSpawn + Unpin,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Transport<E, S, T, U>>,
+    > Future for Unravel<E, S, T, U, P>
 where
     P::Target: Unpin,
     P::Finalize: Unpin,
@@ -233,12 +236,12 @@ where
 }
 
 impl<
-    E,
-    S: LocalSpawn + Unpin,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Coalesce<Transport<E, S, T, U>>,
-> Future for Coalesce<E, S, T, U, P>
+        E,
+        S: LocalSpawn + Unpin,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Coalesce<Transport<E, S, T, U>>,
+    > Future for Coalesce<E, S, T, U, P>
 where
     P::Future: Unpin,
 {
@@ -251,12 +254,12 @@ where
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Coalesce<Transport<E, S, T, U>>,
-> Coalesce<E, S, T, U, P>
+        E,
+        S: LocalSpawn,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Coalesce<Transport<E, S, T, U>>,
+    > Coalesce<E, S, T, U, P>
 where
     P::Future: Unpin,
 {
@@ -278,12 +281,12 @@ where
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Transport<E, S, T, U>>,
-> Unravel<E, S, T, U, P>
+        E,
+        S: LocalSpawn,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Transport<E, S, T, U>>,
+    > Unravel<E, S, T, U, P>
 where
     P::Target: Unpin,
     P::Finalize: Unpin,
@@ -306,34 +309,34 @@ where
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-> Dispatch<P> for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
+    > Dispatch<P> for Transport<E, S, T, U>
 {
     type Handle = ();
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-> Dispatch<Notification<P>> for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
+    > Dispatch<Notification<P>> for Transport<E, S, T, U>
 {
     type Handle = ();
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-> Fork<P> for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
+    > Fork<P> for Transport<E, S, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
 {
@@ -347,12 +350,12 @@ where
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-> Join<P> for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
+    > Join<P> for Transport<E, S, T, U>
 {
     type Future = <P as protocol::Coalesce<Self>>::Future;
 
@@ -364,12 +367,12 @@ impl<
 pub struct Notification<P>(P);
 
 impl<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-> Join<Notification<P>> for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
+    > Join<Notification<P>> for Transport<E, S, T, U>
 where
     <P as protocol::Coalesce<Self>>::Future: Unpin,
 {
@@ -381,12 +384,12 @@ where
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-> Fork<Notification<P>> for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
+    > Fork<Notification<P>> for Transport<E, S, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
 {
@@ -400,12 +403,12 @@ where
 }
 
 impl<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Self> + protocol::Coalesce<Self> + Unpin,
-> Notify<P> for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        P: protocol::Unravel<Self> + protocol::Coalesce<Self> + Unpin,
+    > Notify<P> for Transport<E, S, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
     <P as protocol::Coalesce<Self>>::Future: Unpin,
@@ -435,12 +438,12 @@ pub struct Contextualized<
 }
 
 impl<
-    E,
-    S: LocalSpawn + Unpin,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    F: Unpin + protocol::Future<Transport<E, S, T, U>>,
-> Future for Contextualized<E, S, T, U, F>
+        E,
+        S: LocalSpawn + Unpin,
+        T: Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+        F: Unpin + protocol::Future<Transport<E, S, T, U>>,
+    > Future for Contextualized<E, S, T, U, F>
 {
     type Output = Result<F::Ok, F::Error>;
 
@@ -458,11 +461,11 @@ impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> C
 }
 
 impl<
-    E,
-    S: LocalSpawn + Clone + Unpin,
-    T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-> CloneContext for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn + Clone + Unpin,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+    > CloneContext for Transport<E, S, T, U>
 {
     type Context = Transport<E, S, T, U>;
     type ForkOutput = Ready<(Transport<E, S, T, U>, u32)>;
@@ -491,11 +494,11 @@ impl<
 }
 
 impl<
-    E,
-    S: LocalSpawn + Clone + Unpin,
-    T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-> ShareContext for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn + Clone + Unpin,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+    > ShareContext for Transport<E, S, T, U>
 {
     type Context = Transport<E, S, T, U>;
     type ForkOutput = Ready<(Transport<E, S, T, U>, u32)>;
@@ -537,11 +540,11 @@ impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
 }
 
 impl<
-    E,
-    S: LocalSpawn + Clone + Unpin,
-    T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-> ReferenceContext for Transport<E, S, T, U>
+        E,
+        S: LocalSpawn + Clone + Unpin,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
+        U: Sink<Vec<u8>>,
+    > ReferenceContext for Transport<E, S, T, U>
 {
     type Context = Transport<E, S, T, U>;
     type ForkOutput = Ready<(Transport<E, S, T, U>, u32)>;
@@ -570,12 +573,12 @@ impl<
 }
 
 impl<
-    F: Unpin + protocol::Future<Self> + 'static,
-    E: 'static,
-    S: Unpin + LocalSpawn + Clone + 'static,
-    T: Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
-    U: Sink<Vec<u8>> + 'static,
-> Finalize<F> for Transport<E, S, T, U>
+        F: Unpin + protocol::Future<Self> + 'static,
+        E: 'static,
+        S: Unpin + LocalSpawn + Clone + 'static,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
+        U: Sink<Vec<u8>> + 'static,
+    > Finalize<F> for Transport<E, S, T, U>
 {
     type Target = Self;
     type Output = Ready<(), SpawnError>;
@@ -598,12 +601,12 @@ impl<
 }
 
 impl<
-    F: Unpin + protocol::Future<Self> + 'static,
-    E: 'static,
-    S: Unpin + LocalSpawn + Clone + 'static,
-    T: Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
-    U: Sink<Vec<u8>> + 'static,
-> FinalizeImmediate<F> for Transport<E, S, T, U>
+        F: Unpin + protocol::Future<Self> + 'static,
+        E: 'static,
+        S: Unpin + LocalSpawn + Clone + 'static,
+        T: Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
+        U: Sink<Vec<u8>> + 'static,
+    > FinalizeImmediate<F> for Transport<E, S, T, U>
 {
     type Target = Self;
     type Error = SpawnError;
