@@ -2,7 +2,7 @@ use bincode::{deserialize as from_slice, serialize as to_vec, Error as BincodeEr
 use core_error::Error;
 use futures::{
     ready,
-    task::{LocalSpawn, LocalSpawnExt, SpawnError},
+    task::{Spawn, SpawnError, SpawnExt},
     FutureExt as _, Sink, Stream,
 };
 use protocol::{
@@ -12,7 +12,6 @@ use protocol::{
     Future as _, FutureExt, Join, Notify, Read, ReferenceContext, ShareContext, Write,
 };
 use serde::{de::DeserializeOwned, Serialize};
-// use serde_json::{from_slice, to_vec, Error as BincodeError};
 use std::{
     borrow::BorrowMut,
     collections::{HashMap, VecDeque},
@@ -112,13 +111,13 @@ impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Transpor
     }
 }
 
-pub struct Transport<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> {
+pub struct Transport<E, S: Spawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> {
     id: ContextHandle,
     spawner: S,
     inner: Arc<Mutex<TransportInner<E, T, U>>>,
 }
 
-impl<E, S: LocalSpawn + Clone, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Clone
+impl<E, S: Spawn + Clone, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Clone
     for Transport<E, S, T, U>
 {
     fn clone(&self) -> Self {
@@ -132,7 +131,7 @@ impl<E, S: LocalSpawn + Clone, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         I: DeserializeOwned,
         T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
@@ -148,7 +147,7 @@ impl<
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         I: Serialize,
         T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
         U: Unpin + Sink<Vec<u8>>,
@@ -179,7 +178,7 @@ impl<
 
 pub struct Coalesce<
     E,
-    S: LocalSpawn,
+    S: Spawn,
     T: Stream<Item = Result<Vec<u8>, E>>,
     U: Sink<Vec<u8>>,
     P: protocol::Coalesce<Transport<E, S, T, U>>,
@@ -195,7 +194,7 @@ enum UnravelState<T, U> {
 
 pub struct Unravel<
     E,
-    S: LocalSpawn,
+    S: Spawn,
     T: Stream<Item = Result<Vec<u8>, E>>,
     U: Sink<Vec<u8>>,
     P: protocol::Unravel<Transport<E, S, T, U>>,
@@ -206,7 +205,7 @@ pub struct Unravel<
 
 impl<
         E,
-        S: LocalSpawn + Unpin,
+        S: Spawn + Unpin,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Transport<E, S, T, U>>,
@@ -237,7 +236,7 @@ where
 
 impl<
         E,
-        S: LocalSpawn + Unpin,
+        S: Spawn + Unpin,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Coalesce<Transport<E, S, T, U>>,
@@ -255,7 +254,7 @@ where
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Coalesce<Transport<E, S, T, U>>,
@@ -282,7 +281,7 @@ where
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Transport<E, S, T, U>>,
@@ -310,7 +309,7 @@ where
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
@@ -321,7 +320,7 @@ impl<
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
@@ -332,7 +331,7 @@ impl<
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
@@ -351,7 +350,7 @@ where
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
@@ -368,7 +367,7 @@ pub struct Notification<P>(P);
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
@@ -385,7 +384,7 @@ where
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
@@ -404,7 +403,7 @@ where
 
 impl<
         E,
-        S: LocalSpawn,
+        S: Spawn,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self> + Unpin,
@@ -426,20 +425,14 @@ where
     }
 }
 
-pub struct Contextualized<
-    E,
-    S: LocalSpawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
-    U: Sink<Vec<u8>>,
-    F,
-> {
+pub struct Contextualized<E, S: Spawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>, F> {
     fut: F,
     transport: Transport<E, S, T, U>,
 }
 
 impl<
         E,
-        S: LocalSpawn + Unpin,
+        S: Spawn + Unpin,
         T: Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
         F: Unpin + protocol::Future<Transport<E, S, T, U>>,
@@ -454,7 +447,7 @@ impl<
     }
 }
 
-impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Contextualize
+impl<E, S: Spawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Contextualize
     for Transport<E, S, T, U>
 {
     type Handle = u32;
@@ -462,7 +455,7 @@ impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> C
 
 impl<
         E,
-        S: LocalSpawn + Clone + Unpin,
+        S: Spawn + Clone + Unpin,
         T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
     > CloneContext for Transport<E, S, T, U>
@@ -495,7 +488,7 @@ impl<
 
 impl<
         E,
-        S: LocalSpawn + Clone + Unpin,
+        S: Spawn + Clone + Unpin,
         T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
     > ShareContext for Transport<E, S, T, U>
@@ -526,7 +519,7 @@ impl<
     }
 }
 
-impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
+impl<E, S: Spawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
     ContextReference<Transport<E, S, T, U>> for Transport<E, S, T, U>
 {
     type Target = Transport<E, S, T, U>;
@@ -541,7 +534,7 @@ impl<E, S: LocalSpawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
 
 impl<
         E,
-        S: LocalSpawn + Clone + Unpin,
+        S: Spawn + Clone + Unpin,
         T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
         U: Sink<Vec<u8>>,
     > ReferenceContext for Transport<E, S, T, U>
@@ -573,11 +566,11 @@ impl<
 }
 
 impl<
-        F: Unpin + protocol::Future<Self> + 'static,
+        F: Send + Unpin + protocol::Future<Self> + 'static,
         E: 'static,
-        S: Unpin + LocalSpawn + Clone + 'static,
-        T: Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
-        U: Sink<Vec<u8>> + 'static,
+        S: Send + Unpin + Spawn + Clone + 'static,
+        T: Send + Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
+        U: Send + Sink<Vec<u8>> + 'static,
     > Finalize<F> for Transport<E, S, T, U>
 {
     type Target = Self;
@@ -585,7 +578,7 @@ impl<
 
     fn finalize(&mut self, fut: F) -> Self::Output {
         ready(
-            self.spawner.spawn_local(
+            self.spawner.spawn(
                 Contextualized {
                     fut,
                     transport: Transport {
@@ -601,18 +594,18 @@ impl<
 }
 
 impl<
-        F: Unpin + protocol::Future<Self> + 'static,
+        F: Send + Unpin + protocol::Future<Self> + 'static,
         E: 'static,
-        S: Unpin + LocalSpawn + Clone + 'static,
-        T: Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
-        U: Sink<Vec<u8>> + 'static,
+        S: Send + Unpin + Spawn + Clone + 'static,
+        T: Send + Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
+        U: Send + Sink<Vec<u8>> + 'static,
     > FinalizeImmediate<F> for Transport<E, S, T, U>
 {
     type Target = Self;
     type Error = SpawnError;
 
     fn finalize_immediate(&mut self, fut: F) -> Result<(), SpawnError> {
-        self.spawner.spawn_local(
+        self.spawner.spawn(
             Contextualized {
                 fut,
                 transport: Transport {
