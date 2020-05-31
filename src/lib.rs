@@ -182,7 +182,9 @@ pub struct Coalesce<
     T: Stream<Item = Result<Vec<u8>, E>>,
     U: Sink<Vec<u8>>,
     P: protocol::Coalesce<Transport<E, S, T, U>>,
-> {
+> where
+    P::Future: Unpin,
+{
     fut: P::Future,
     transport: Transport<E, S, T, U>,
 }
@@ -198,7 +200,10 @@ pub struct Unravel<
     T: Stream<Item = Result<Vec<u8>, E>>,
     U: Sink<Vec<u8>>,
     P: protocol::Unravel<Transport<E, S, T, U>>,
-> {
+> where
+    P::Target: Unpin,
+    P::Finalize: Unpin,
+{
     fut: UnravelState<P::Target, P::Finalize>,
     transport: Transport<E, S, T, U>,
 }
