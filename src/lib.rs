@@ -17,6 +17,7 @@ use std::{
     collections::{HashMap, VecDeque},
     convert::TryInto,
     future::Future,
+    marker::PhantomData,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -621,5 +622,57 @@ impl<
             }
             .map(|_| ()),
         )
+    }
+}
+
+#[cfg(feature = "vessels")]
+pub struct ProtocolMveTransport<E>(PhantomData<E>);
+
+#[cfg(feature = "vessels")]
+impl<E> ProtocolMveTransport<E> {
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+#[cfg(feature = "vessels")]
+mod vessels {
+    use super::{Coalesce, ProtocolMveTransport, Transport, Unravel};
+    use futures::{task::Spawn, Sink, Stream};
+    use vessels_dep::runtime::{FramedTransportCoalesce, FramedTransportUnravel};
+
+    impl<
+            E,
+            U: Stream<Item = Result<Vec<u8>, E>>,
+            V: Sink<Vec<u8>>,
+            T: protocol::Coalesce<Transport<E, S, U, V>>,
+            S: Spawn + Unpin,
+        > FramedTransportCoalesce<T, U, V, S> for ProtocolMveTransport<E>
+    where
+        T::Future: Unpin,
+    {
+        type Coalesce = Coalesce<E, S, U, V, T>;
+
+        fn coalesce(stream: U, sink: V, spawner: S) -> Self::Coalesce {
+            Coalesce::new(stream, sink, spawner)
+        }
+    }
+
+    impl<
+            E,
+            U: Stream<Item = Result<Vec<u8>, E>>,
+            V: Sink<Vec<u8>>,
+            T: protocol::Unravel<Transport<E, S, U, V>>,
+            S: Spawn + Unpin,
+        > FramedTransportUnravel<T, U, V, S> for ProtocolMveTransport<E>
+    where
+        T::Target: Unpin,
+        T::Finalize: Unpin,
+    {
+        type Unravel = Unravel<E, S, U, V, T>;
+
+        fn unravel(item: T, stream: U, sink: V, spawner: S) -> Self::Unravel {
+            Unravel::new(stream, sink, spawner, item)
+        }
     }
 }
