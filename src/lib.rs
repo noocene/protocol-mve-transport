@@ -639,7 +639,7 @@ impl<E> ProtocolMveTransport<E> {
 mod vessels {
     use super::{Coalesce, ProtocolMveTransport, Transport, Unravel};
     use futures::{task::Spawn, Sink, Stream};
-    use vessels_dep::runtime::{FramedTransportCoalesce, FramedTransportUnravel};
+    use erasure_traits::{FramedTransportCoalesce, FramedTransportUnravel};
 
     impl<
             E,
