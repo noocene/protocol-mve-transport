@@ -19,6 +19,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
+    task::Waker,
     task::{Context, Poll},
 };
 use thiserror::Error;
@@ -30,7 +31,7 @@ pub struct TransportInner<T: TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> {
     stream: T,
     next_id: u32,
     sink: U,
-    buffer: HashMap<ContextHandle, VecDeque<Vec<u8>>>,
+    buffer: HashMap<ContextHandle, (VecDeque<Vec<u8>>, Vec<Waker>)>,
 }
 
 impl<T: Unpin + TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> Unpin for TransportInner<T, U> {}
@@ -74,16 +75,32 @@ impl<T: Unpin + TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> TransportInner<T, U> 
         if let Some(data) = this
             .buffer
             .get_mut(&handle)
-            .map(|container| container.pop_front())
+            .map(|container| container.0.pop_front())
             .flatten()
         {
             Poll::Ready(from_slice(&data[4..]).map_err(SerdeReadError::Serde))
         } else {
             let mut stream = Pin::new(&mut this.stream);
             let data = loop {
-                let data = ready!(stream.as_mut().try_poll_next(cx))
-                    .ok_or(SerdeReadError::Terminated)?
-                    .map_err(SerdeReadError::Stream)?;
+                let data = match stream.as_mut().try_poll_next(cx) {
+                    Poll::Ready(data) => data,
+                    Poll::Pending => {
+                        let wakers = &mut this
+                            .buffer
+                            .entry(ContextHandle(handle.0))
+                            .or_insert((VecDeque::new(), vec![]))
+                            .1;
+                        for waker in &mut *wakers {
+                            if waker.will_wake(cx.waker()) {
+                                return Poll::Pending;
+                            }
+                        }
+                        wakers.push(cx.waker().clone());
+                        return Poll::Pending;
+                    }
+                }
+                .ok_or(SerdeReadError::Terminated)?
+                .map_err(SerdeReadError::Stream)?;
                 if data.len() < 4 {
                     return Poll::Ready(Err(SerdeReadError::Insufficient));
                 }
@@ -97,10 +114,14 @@ impl<T: Unpin + TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> TransportInner<T, U> 
                 if target_handle == handle.0 {
                     break data;
                 } else {
-                    this.buffer
+                    let entry = &mut this
+                        .buffer
                         .entry(ContextHandle(target_handle))
-                        .or_insert(VecDeque::new())
-                        .push_back(data);
+                        .or_insert((VecDeque::new(), vec![]));
+                    entry.0.push_back(data);
+                    for waker in entry.1.drain(..) {
+                        waker.wake();
+                    }
                 }
             };
             Poll::Ready(from_slice(&data[4..]).map_err(SerdeReadError::Serde))
