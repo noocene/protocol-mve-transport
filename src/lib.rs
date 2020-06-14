@@ -3,7 +3,7 @@ use core_error::Error;
 use futures::{
     ready,
     task::{Spawn, SpawnError, SpawnExt},
-    FutureExt as _, Sink, Stream,
+    FutureExt as _, Sink, TryStream,
 };
 use protocol::{
     future::MapOk,
@@ -17,7 +17,6 @@ use std::{
     collections::{HashMap, VecDeque},
     convert::TryInto,
     future::Future,
-    marker::PhantomData,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -27,17 +26,14 @@ use thiserror::Error;
 #[derive(Hash, PartialEq, Eq, Clone, Copy)]
 pub struct ContextHandle(u32);
 
-pub struct TransportInner<E, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> {
+pub struct TransportInner<T: TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> {
     stream: T,
     next_id: u32,
     sink: U,
     buffer: HashMap<ContextHandle, VecDeque<Vec<u8>>>,
 }
 
-impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Unpin
-    for TransportInner<E, T, U>
-{
-}
+impl<T: Unpin + TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> Unpin for TransportInner<T, U> {}
 
 #[derive(Debug, Error)]
 #[bounds(where E: Error + 'static)]
@@ -61,7 +57,7 @@ pub enum SerdeWriteError<E> {
     Serde(#[source] BincodeError),
 }
 
-impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> TransportInner<E, T, U> {
+impl<T: Unpin + TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> TransportInner<T, U> {
     fn next_id(&mut self) -> ContextHandle {
         let handle = self.next_id;
         self.next_id += 2;
@@ -72,7 +68,7 @@ impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Transpor
         mut self: Pin<&mut Self>,
         cx: &mut Context,
         handle: ContextHandle,
-    ) -> Poll<Result<I, SerdeReadError<E>>> {
+    ) -> Poll<Result<I, SerdeReadError<T::Error>>> {
         let this = &mut *self;
 
         if let Some(data) = this
@@ -85,7 +81,7 @@ impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Transpor
         } else {
             let mut stream = Pin::new(&mut this.stream);
             let data = loop {
-                let data = ready!(stream.as_mut().poll_next(cx))
+                let data = ready!(stream.as_mut().try_poll_next(cx))
                     .ok_or(SerdeReadError::Terminated)?
                     .map_err(SerdeReadError::Stream)?;
                 if data.len() < 4 {
@@ -112,15 +108,13 @@ impl<E, T: Unpin + Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Transpor
     }
 }
 
-pub struct Transport<E, S: Spawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> {
+pub struct Transport<S: Spawn, T: TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> {
     id: ContextHandle,
     spawner: S,
-    inner: Arc<Mutex<TransportInner<E, T, U>>>,
+    inner: Arc<Mutex<TransportInner<T, U>>>,
 }
 
-impl<E, S: Spawn + Clone, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Clone
-    for Transport<E, S, T, U>
-{
+impl<S: Spawn + Clone, T: TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> Clone for Transport<S, T, U> {
     fn clone(&self) -> Self {
         Transport {
             id: self.id,
@@ -130,15 +124,10 @@ impl<E, S: Spawn + Clone, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>
     }
 }
 
-impl<
-        E,
-        S: Spawn,
-        I: DeserializeOwned,
-        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-        U: Sink<Vec<u8>>,
-    > Read<I> for Transport<E, S, T, U>
+impl<S: Spawn, I: DeserializeOwned, T: Unpin + TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> Read<I>
+    for Transport<S, T, U>
 {
-    type Error = SerdeReadError<E>;
+    type Error = SerdeReadError<T::Error>;
 
     fn read(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<I, Self::Error>> {
         let id = self.id;
@@ -146,13 +135,8 @@ impl<
     }
 }
 
-impl<
-        E,
-        S: Spawn,
-        I: Serialize,
-        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-        U: Unpin + Sink<Vec<u8>>,
-    > Write<I> for Transport<E, S, T, U>
+impl<S: Spawn, I: Serialize, T: Unpin + TryStream<Ok = Vec<u8>>, U: Unpin + Sink<Vec<u8>>> Write<I>
+    for Transport<S, T, U>
 {
     type Error = SerdeWriteError<U::Error>;
 
@@ -178,16 +162,15 @@ impl<
 }
 
 pub struct Coalesce<
-    E,
     S: Spawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
+    T: TryStream<Ok = Vec<u8>>,
     U: Sink<Vec<u8>>,
-    P: protocol::Coalesce<Transport<E, S, T, U>>,
+    P: protocol::Coalesce<Transport<S, T, U>>,
 > where
     P::Future: Unpin,
 {
     fut: P::Future,
-    transport: Transport<E, S, T, U>,
+    transport: Transport<S, T, U>,
 }
 
 enum UnravelState<T, U> {
@@ -196,31 +179,29 @@ enum UnravelState<T, U> {
 }
 
 pub struct Unravel<
-    E,
     S: Spawn,
-    T: Stream<Item = Result<Vec<u8>, E>>,
+    T: TryStream<Ok = Vec<u8>>,
     U: Sink<Vec<u8>>,
-    P: protocol::Unravel<Transport<E, S, T, U>>,
+    P: protocol::Unravel<Transport<S, T, U>>,
 > where
     P::Target: Unpin,
     P::Finalize: Unpin,
 {
     fut: UnravelState<P::Target, P::Finalize>,
-    transport: Transport<E, S, T, U>,
+    transport: Transport<S, T, U>,
 }
 
 impl<
-        E,
         S: Spawn + Unpin,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
-        P: protocol::Unravel<Transport<E, S, T, U>>,
-    > Future for Unravel<E, S, T, U, P>
+        P: protocol::Unravel<Transport<S, T, U>>,
+    > Future for Unravel<S, T, U, P>
 where
     P::Target: Unpin,
     P::Finalize: Unpin,
 {
-    type Output = Result<(), <P::Target as protocol::Future<Transport<E, S, T, U>>>::Error>;
+    type Output = Result<(), <P::Target as protocol::Future<Transport<S, T, U>>>::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = &mut *self;
@@ -241,16 +222,15 @@ where
 }
 
 impl<
-        E,
         S: Spawn + Unpin,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
-        P: protocol::Coalesce<Transport<E, S, T, U>>,
-    > Future for Coalesce<E, S, T, U, P>
+        P: protocol::Coalesce<Transport<S, T, U>>,
+    > Future for Coalesce<S, T, U, P>
 where
     P::Future: Unpin,
 {
-    type Output = Result<P, <P::Future as protocol::Future<Transport<E, S, T, U>>>::Error>;
+    type Output = Result<P, <P::Future as protocol::Future<Transport<S, T, U>>>::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = &mut *self;
@@ -259,12 +239,11 @@ where
 }
 
 impl<
-        E,
         S: Spawn,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
-        P: protocol::Coalesce<Transport<E, S, T, U>>,
-    > Coalesce<E, S, T, U, P>
+        P: protocol::Coalesce<Transport<S, T, U>>,
+    > Coalesce<S, T, U, P>
 where
     P::Future: Unpin,
 {
@@ -286,12 +265,11 @@ where
 }
 
 impl<
-        E,
         S: Spawn,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
-        P: protocol::Unravel<Transport<E, S, T, U>>,
-    > Unravel<E, S, T, U, P>
+        P: protocol::Unravel<Transport<S, T, U>>,
+    > Unravel<S, T, U, P>
 where
     P::Target: Unpin,
     P::Finalize: Unpin,
@@ -314,34 +292,31 @@ where
 }
 
 impl<
-        E,
         S: Spawn,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Dispatch<P> for Transport<E, S, T, U>
+    > Dispatch<P> for Transport<S, T, U>
 {
     type Handle = ();
 }
 
 impl<
-        E,
         S: Spawn,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Dispatch<Notification<P>> for Transport<E, S, T, U>
+    > Dispatch<Notification<P>> for Transport<S, T, U>
 {
     type Handle = ();
 }
 
 impl<
-        E,
         S: Spawn,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Fork<P> for Transport<E, S, T, U>
+    > Fork<P> for Transport<S, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
 {
@@ -355,12 +330,11 @@ where
 }
 
 impl<
-        E,
         S: Spawn,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Join<P> for Transport<E, S, T, U>
+    > Join<P> for Transport<S, T, U>
 {
     type Future = <P as protocol::Coalesce<Self>>::Future;
 
@@ -372,12 +346,11 @@ impl<
 pub struct Notification<P>(P);
 
 impl<
-        E,
         S: Spawn,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Join<Notification<P>> for Transport<E, S, T, U>
+    > Join<Notification<P>> for Transport<S, T, U>
 where
     <P as protocol::Coalesce<Self>>::Future: Unpin,
 {
@@ -389,12 +362,11 @@ where
 }
 
 impl<
-        E,
         S: Spawn,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self>,
-    > Fork<Notification<P>> for Transport<E, S, T, U>
+    > Fork<Notification<P>> for Transport<S, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
 {
@@ -408,12 +380,11 @@ where
 }
 
 impl<
-        E,
         S: Spawn,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
         P: protocol::Unravel<Self> + protocol::Coalesce<Self> + Unpin,
-    > Notify<P> for Transport<E, S, T, U>
+    > Notify<P> for Transport<S, T, U>
 where
     <P as protocol::Unravel<Self>>::Target: Unpin,
     <P as protocol::Coalesce<Self>>::Future: Unpin,
@@ -431,18 +402,17 @@ where
     }
 }
 
-pub struct Contextualized<E, S: Spawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>, F> {
+pub struct Contextualized<S: Spawn, T: TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>, F> {
     fut: F,
-    transport: Transport<E, S, T, U>,
+    transport: Transport<S, T, U>,
 }
 
 impl<
-        E,
         S: Spawn + Unpin,
-        T: Stream<Item = Result<Vec<u8>, E>>,
+        T: TryStream<Ok = Vec<u8>>,
         U: Sink<Vec<u8>>,
-        F: Unpin + protocol::Future<Transport<E, S, T, U>>,
-    > Future for Contextualized<E, S, T, U, F>
+        F: Unpin + protocol::Future<Transport<S, T, U>>,
+    > Future for Contextualized<S, T, U, F>
 {
     type Output = Result<F::Ok, F::Error>;
 
@@ -453,22 +423,16 @@ impl<
     }
 }
 
-impl<E, S: Spawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>> Contextualize
-    for Transport<E, S, T, U>
-{
+impl<S: Spawn, T: TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> Contextualize for Transport<S, T, U> {
     type Handle = u32;
 }
 
-impl<
-        E,
-        S: Spawn + Clone + Unpin,
-        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-        U: Sink<Vec<u8>>,
-    > CloneContext for Transport<E, S, T, U>
+impl<S: Spawn + Clone + Unpin, T: Unpin + TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> CloneContext
+    for Transport<S, T, U>
 {
-    type Context = Transport<E, S, T, U>;
-    type ForkOutput = Ready<(Transport<E, S, T, U>, u32)>;
-    type JoinOutput = Ready<Transport<E, S, T, U>>;
+    type Context = Transport<S, T, U>;
+    type ForkOutput = Ready<(Transport<S, T, U>, u32)>;
+    type JoinOutput = Ready<Transport<S, T, U>>;
 
     fn fork_owned(&mut self) -> Self::ForkOutput {
         let id = self.inner.lock().unwrap().next_id();
@@ -492,16 +456,12 @@ impl<
     }
 }
 
-impl<
-        E,
-        S: Spawn + Clone + Unpin,
-        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-        U: Sink<Vec<u8>>,
-    > ShareContext for Transport<E, S, T, U>
+impl<S: Spawn + Clone + Unpin, T: Unpin + TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> ShareContext
+    for Transport<S, T, U>
 {
-    type Context = Transport<E, S, T, U>;
-    type ForkOutput = Ready<(Transport<E, S, T, U>, u32)>;
-    type JoinOutput = Ready<Transport<E, S, T, U>>;
+    type Context = Transport<S, T, U>;
+    type ForkOutput = Ready<(Transport<S, T, U>, u32)>;
+    type JoinOutput = Ready<Transport<S, T, U>>;
 
     fn fork_shared(&mut self) -> Self::ForkOutput {
         let id = self.inner.lock().unwrap().next_id();
@@ -525,12 +485,12 @@ impl<
     }
 }
 
-impl<E, S: Spawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
-    ContextReference<Transport<E, S, T, U>> for Transport<E, S, T, U>
+impl<S: Spawn, T: TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>> ContextReference<Transport<S, T, U>>
+    for Transport<S, T, U>
 {
-    type Target = Transport<E, S, T, U>;
+    type Target = Transport<S, T, U>;
 
-    fn with<'a, 'b: 'a, R: BorrowMut<Transport<E, S, T, U>> + 'b>(
+    fn with<'a, 'b: 'a, R: BorrowMut<Transport<S, T, U>> + 'b>(
         &'a mut self,
         _: R,
     ) -> &'a mut Self::Target {
@@ -538,16 +498,12 @@ impl<E, S: Spawn, T: Stream<Item = Result<Vec<u8>, E>>, U: Sink<Vec<u8>>>
     }
 }
 
-impl<
-        E,
-        S: Spawn + Clone + Unpin,
-        T: Unpin + Stream<Item = Result<Vec<u8>, E>>,
-        U: Sink<Vec<u8>>,
-    > ReferenceContext for Transport<E, S, T, U>
+impl<S: Spawn + Clone + Unpin, T: Unpin + TryStream<Ok = Vec<u8>>, U: Sink<Vec<u8>>>
+    ReferenceContext for Transport<S, T, U>
 {
-    type Context = Transport<E, S, T, U>;
-    type ForkOutput = Ready<(Transport<E, S, T, U>, u32)>;
-    type JoinOutput = Ready<Transport<E, S, T, U>>;
+    type Context = Transport<S, T, U>;
+    type ForkOutput = Ready<(Transport<S, T, U>, u32)>;
+    type JoinOutput = Ready<Transport<S, T, U>>;
 
     fn fork_ref(&mut self) -> Self::ForkOutput {
         let id = self.inner.lock().unwrap().next_id();
@@ -573,11 +529,10 @@ impl<
 
 impl<
         F: Send + Unpin + protocol::Future<Self> + 'static,
-        E: 'static,
         S: Send + Unpin + Spawn + Clone + 'static,
-        T: Send + Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
+        T: Send + Unpin + TryStream<Ok = Vec<u8>> + 'static,
         U: Send + Sink<Vec<u8>> + 'static,
-    > Finalize<F> for Transport<E, S, T, U>
+    > Finalize<F> for Transport<S, T, U>
 {
     type Target = Self;
     type Output = Ready<(), SpawnError>;
@@ -601,11 +556,10 @@ impl<
 
 impl<
         F: Send + Unpin + protocol::Future<Self> + 'static,
-        E: 'static,
         S: Send + Unpin + Spawn + Clone + 'static,
-        T: Send + Unpin + Stream<Item = Result<Vec<u8>, E>> + 'static,
+        T: Send + Unpin + TryStream<Ok = Vec<u8>> + 'static,
         U: Send + Sink<Vec<u8>> + 'static,
-    > FinalizeImmediate<F> for Transport<E, S, T, U>
+    > FinalizeImmediate<F> for Transport<S, T, U>
 {
     type Target = Self;
     type Error = SpawnError;
@@ -626,32 +580,24 @@ impl<
 }
 
 #[cfg(feature = "vessels")]
-pub struct ProtocolMveTransport<E>(PhantomData<E>);
-
-#[cfg(feature = "vessels")]
-impl<E> ProtocolMveTransport<E> {
-    pub fn new() -> Self {
-        Self(PhantomData)
-    }
-}
+pub struct ProtocolMveTransport;
 
 #[cfg(feature = "vessels")]
 mod vessels {
     use super::{Coalesce, ProtocolMveTransport, Transport, Unravel};
-    use futures::{task::Spawn, Sink, Stream};
     use erasure_traits::{FramedTransportCoalesce, FramedTransportUnravel};
+    use futures::{task::Spawn, Sink, TryStream};
 
     impl<
-            E,
-            U: Stream<Item = Result<Vec<u8>, E>>,
+            U: TryStream<Ok = Vec<u8>>,
             V: Sink<Vec<u8>>,
-            T: protocol::Coalesce<Transport<E, S, U, V>>,
+            T: protocol::Coalesce<Transport<S, U, V>>,
             S: Spawn + Unpin,
-        > FramedTransportCoalesce<T, U, V, S> for ProtocolMveTransport<E>
+        > FramedTransportCoalesce<T, U, V, S> for ProtocolMveTransport
     where
         T::Future: Unpin,
     {
-        type Coalesce = Coalesce<E, S, U, V, T>;
+        type Coalesce = Coalesce<S, U, V, T>;
 
         fn coalesce(stream: U, sink: V, spawner: S) -> Self::Coalesce {
             Coalesce::new(stream, sink, spawner)
@@ -659,17 +605,16 @@ mod vessels {
     }
 
     impl<
-            E,
-            U: Stream<Item = Result<Vec<u8>, E>>,
+            U: TryStream<Ok = Vec<u8>>,
             V: Sink<Vec<u8>>,
-            T: protocol::Unravel<Transport<E, S, U, V>>,
+            T: protocol::Unravel<Transport<S, U, V>>,
             S: Spawn + Unpin,
-        > FramedTransportUnravel<T, U, V, S> for ProtocolMveTransport<E>
+        > FramedTransportUnravel<T, U, V, S> for ProtocolMveTransport
     where
         T::Target: Unpin,
         T::Finalize: Unpin,
     {
-        type Unravel = Unravel<E, S, U, V, T>;
+        type Unravel = Unravel<S, U, V, T>;
 
         fn unravel(item: T, stream: U, sink: V, spawner: S) -> Self::Unravel {
             Unravel::new(stream, sink, spawner, item)
