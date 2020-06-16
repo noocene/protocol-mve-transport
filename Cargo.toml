@@ -13,6 +13,7 @@ core-error = { git = "https://github.com/core-error/core-error" }
 void = "1.0.2"
 bincode = "1.2.1"
 erasure-traits = { git = "https://github.com/noocene/erasure-traits", optional = true }
+piper = "0.1.3"
 
 [features]
 vessels = ["erasure-traits"]
