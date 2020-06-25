@@ -1,11 +1,7 @@
 use bincode::{deserialize as from_slice, serialize as to_vec};
 use core_error::Error;
 use futures::{
-    channel::{
-        mpsc::{channel as mpsc, unbounded, Sender as MpscSender, UnboundedSender},
-        oneshot::{channel, Receiver as OneshotReceiver},
-    },
-    future::Shared,
+    channel::mpsc::{channel as mpsc, unbounded, Sender as MpscSender, UnboundedSender},
     lock::Mutex,
     ready,
     task::{Spawn, SpawnError, SpawnExt},
@@ -74,8 +70,8 @@ pub struct Transport<S: Spawn, StreamError, SinkError, P> {
     spawner: S,
     receiver: Receiver<Vec<u8>>,
     sender: MpscSender<Vec<u8>>,
-    sink_error: Shared<OneshotReceiver<SerdeWriteError<SinkError>>>,
-    stream_error: Shared<OneshotReceiver<SerdeReadError<StreamError>>>,
+    sink_error: Receiver<SerdeWriteError<SinkError>>,
+    stream_error: Receiver<SerdeReadError<StreamError>>,
     new_channel_sender: UnboundedSender<(ContextHandle, Sender<Vec<u8>>)>,
     _marker: PhantomData<P>,
 }
@@ -138,16 +134,13 @@ impl<S: Spawn + Clone, StreamError, SinkError, P> Clone
 
 impl<S: Spawn, T, U, P> Unpin for Transport<S, T, U, P> {}
 
-impl<S: Spawn, I: DeserializeOwned, T, U, P> Read<I> for Transport<S, T, U, P>
-where
-    T: Clone,
-{
+impl<S: Spawn, I: DeserializeOwned, T, U, P> Read<I> for Transport<S, T, U, P> {
     type Error = SerdeReadError<T>;
 
     fn read(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<I, Self::Error>> {
         let this = &mut *self;
 
-        if let Poll::Ready(Ok(error)) = Pin::new(&mut this.stream_error).poll(cx) {
+        if let Poll::Ready(Some(error)) = Pin::new(&mut this.stream_error).poll_next(cx) {
             return Poll::Ready(Err(error));
         }
 
@@ -158,10 +151,7 @@ where
     }
 }
 
-impl<S: Spawn, I: Serialize, T, U, P> Write<I> for Transport<S, T, U, P>
-where
-    U: Clone,
-{
+impl<S: Spawn, I: Serialize, T, U, P> Write<I> for Transport<S, T, U, P> {
     type Error = SerdeWriteError<U>;
 
     fn write(mut self: Pin<&mut Self>, item: I) -> Result<(), Self::Error> {
@@ -178,7 +168,7 @@ where
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         let this = &mut *self;
 
-        if let Poll::Ready(Ok(error)) = Pin::new(&mut this.sink_error).poll(cx) {
+        if let Poll::Ready(Some(error)) = Pin::new(&mut this.sink_error).poll_next(cx) {
             return Poll::Ready(Err(error));
         }
 
@@ -190,7 +180,7 @@ where
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         let this = &mut *self;
 
-        if let Poll::Ready(Ok(error)) = Pin::new(&mut this.sink_error).poll(cx) {
+        if let Poll::Ready(Some(error)) = Pin::new(&mut this.sink_error).poll_next(cx) {
             return Poll::Ready(Err(error));
         }
 
@@ -306,18 +296,15 @@ impl<
     > Coalesce<T, U, S, P>
 where
     P::Future: Unpin,
-    T::Error: Clone + Send,
-    U::Error: Clone + Send,
+    T::Error: Send,
+    U::Error: Send,
 {
     pub fn new(stream: T, sink: U, spawner: S) -> Self {
         let (b_sender, receiver) = chan(1);
         let (sender, b_receiver) = mpsc(1);
 
-        let (sink_error_sender, sink_error) = channel();
-        let (stream_error_sender, stream_error) = channel();
-
-        let sink_error = sink_error.shared();
-        let stream_error = stream_error.shared();
+        let (sink_error_sender, sink_error) = chan(1);
+        let (stream_error_sender, stream_error) = chan(1);
 
         let (new_channel_sender, mut new_channels) = unbounded();
 
@@ -438,19 +425,16 @@ impl<
     > Unravel<T, U, S, P>
 where
     P::Target: Unpin,
-    T::Error: Clone + Send,
-    U::Error: Clone + Send,
+    T::Error: Send,
+    U::Error: Send,
     P::Finalize: Unpin,
 {
     pub fn new(stream: T, sink: U, spawner: S, item: P) -> Self {
         let (b_sender, receiver) = chan(1);
         let (sender, b_receiver) = mpsc(1);
 
-        let (sink_error_sender, sink_error) = channel();
-        let (stream_error_sender, stream_error) = channel();
-
-        let sink_error = sink_error.shared();
-        let stream_error = stream_error.shared();
+        let (sink_error_sender, sink_error) = chan(1);
+        let (stream_error_sender, stream_error) = chan(1);
 
         let (new_channel_sender, mut new_channels) = unbounded();
 
@@ -755,8 +739,8 @@ mod vessels {
         > FramedTransportCoalesce<T, U, V, S> for ProtocolMveTransport
     where
         T::Future: Unpin,
-        U::Error: Clone + Send,
-        V::Error: Clone + Send,
+        U::Error: Send,
+        V::Error: Send,
         U: Send + Unpin + 'static,
         V: Send + 'static,
         S: Clone + Send + 'static,
@@ -777,8 +761,8 @@ mod vessels {
     where
         T::Target: Unpin,
         T::Finalize: Unpin,
-        U::Error: Clone + Send,
-        V::Error: Clone + Send,
+        U::Error: Send,
+        V::Error: Send,
         U: Send + Unpin + 'static,
         V: Send + 'static,
         S: Clone + Send + 'static,
